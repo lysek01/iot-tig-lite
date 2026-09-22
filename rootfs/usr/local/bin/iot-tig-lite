@@ -1,0 +1,174 @@
+#!/bin/bash
+# iot-tig-lite entrypoint – starts and supervises all services.
+#
+#   InfluxDB  -> (optional) Mosquitto -> Telegraf -> Grafana -> status reporter
+#
+# If any service stops, all others are stopped and the container exits,
+# so Docker's restart policy can start everything again cleanly.
+
+set -uo pipefail
+
+RUN_DIR=/run/iot-tig-lite
+SHARE=/usr/share/iot-tig-lite
+mkdir -p "$RUN_DIR"
+
+log()  { printf '[iot-tig-lite] %s\n' "$*"; }
+fail() { log "ERROR: $*"; exit 1; }
+
+# Prefix every output line of a service with its name.
+prefix() { awk -v p="[$1] " '{ print p $0; fflush() }'; }
+
+# ---------------------------------------------------------------------
+# Validate configuration
+# ---------------------------------------------------------------------
+case "$MQTT_FORMAT" in
+  auto|value|json|influx) ;;
+  *) fail "MQTT_FORMAT='$MQTT_FORMAT' is not valid. Use one of: auto, value, json, influx" ;;
+esac
+
+if [ "$MQTT_BROKER" = "internal" ]; then
+  MQTT_SERVER="tcp://127.0.0.1:1883"
+elif [[ "$MQTT_BROKER" =~ ^(tcp|ssl|tls|ws|wss)://[^/:]+(:[0-9]+)?$ ]]; then
+  MQTT_SERVER="$MQTT_BROKER"
+else
+  fail "MQTT_BROKER='$MQTT_BROKER' is not valid. Use 'internal' or an address like tcp://192.168.1.100:1883"
+fi
+
+[ -n "${MQTT_TOPICS// /}" ] || fail "MQTT_TOPICS is empty. Use e.g. '#' to subscribe to all topics"
+for v in INFLUXDB_DB INFLUXDB_USER INFLUXDB_USER_PASSWORD INFLUXDB_ADMIN_USER INFLUXDB_ADMIN_PASSWORD; do
+  [ -n "${!v}" ] || fail "$v must not be empty"
+done
+[ "$INFLUXDB_USER" != "$INFLUXDB_ADMIN_USER" ] || fail "INFLUXDB_USER and INFLUXDB_ADMIN_USER must be different users"
+
+export MQTT_SERVER
+
+log "starting iot-tig-lite ($IOT_TIG_LITE_VERSIONS)"
+
+# ---------------------------------------------------------------------
+# Service handling
+# ---------------------------------------------------------------------
+declare -A PIDS=()
+STOPPING=0
+
+stop_all() {
+  STOPPING=1
+  # stop in reverse order, InfluxDB last so Telegraf can flush its buffer
+  for name in status grafana telegraf mosquitto influxdb; do
+    pid="${PIDS[$name]:-}"
+    [ -n "$pid" ] || continue
+    kill -TERM "$pid" 2>/dev/null
+    for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    kill -KILL "$pid" 2>/dev/null
+  done
+}
+
+on_signal() {
+  log "stopping..."
+  stop_all
+  log "stopped"
+  exit 0
+}
+trap on_signal TERM INT
+
+wait_for() { # wait_for <name> <seconds> <command...>
+  local name=$1 timeout=$2; shift 2
+  for _ in $(seq 1 "$timeout"); do
+    "$@" >/dev/null 2>&1 && return 0
+    kill -0 "${PIDS[$name]}" 2>/dev/null || fail "$name stopped during startup (see messages above)"
+    sleep 1
+  done
+  fail "$name did not become ready within ${timeout}s"
+}
+
+# ---------------------------------------------------------------------
+# 1) InfluxDB – apply database/user/retention settings, then start
+# ---------------------------------------------------------------------
+/usr/local/bin/influxdb-setup 2>&1 | prefix influxdb
+[ "${PIPESTATUS[0]}" -eq 0 ] || fail "InfluxDB setup failed"
+
+influxd -config /etc/influxdb/influxdb.conf > >(prefix influxdb) 2>&1 &
+PIDS[influxdb]=$!
+wait_for influxdb 120 curl -sf http://127.0.0.1:8086/ping
+
+# ---------------------------------------------------------------------
+# 2) Mosquitto – only when the built-in broker is used
+# ---------------------------------------------------------------------
+if [ "$MQTT_BROKER" = "internal" ]; then
+  if [ ! -f /mosquitto/config/mosquitto.conf ]; then
+    log "no /mosquitto/config/mosquitto.conf found, creating the default one"
+    cp "$SHARE/mosquitto.conf" /mosquitto/config/mosquitto.conf
+  fi
+  chown -R mosquitto:mosquitto /mosquitto/data /mosquitto/log 2>/dev/null
+  mosquitto -c /mosquitto/config/mosquitto.conf > >(prefix mosquitto) 2>&1 &
+  PIDS[mosquitto]=$!
+  sleep 1
+  kill -0 "${PIDS[mosquitto]}" 2>/dev/null || fail "mosquitto stopped during startup (see messages above)"
+fi
+
+# ---------------------------------------------------------------------
+# 3) Telegraf – MQTT -> InfluxDB
+# ---------------------------------------------------------------------
+if [ -f /etc/telegraf/telegraf.conf ]; then
+  log "using your own /etc/telegraf/telegraf.conf"
+  TELEGRAF_CONF=/etc/telegraf/telegraf.conf
+else
+  /usr/local/bin/telegraf-config > "$RUN_DIR/telegraf.conf" || fail "cannot create Telegraf configuration"
+  TELEGRAF_CONF="$RUN_DIR/telegraf.conf"
+fi
+telegraf --strict-env-handling --config "$TELEGRAF_CONF" --config-directory /etc/telegraf/telegraf.d > >(prefix telegraf) 2>&1 &
+PIDS[telegraf]=$!
+
+# ---------------------------------------------------------------------
+# 4) Grafana
+# ---------------------------------------------------------------------
+chown -R grafana:grafana "$GF_PATHS_DATA" "$GF_PATHS_LOGS" 2>/dev/null
+su-exec grafana grafana server \
+  --homepath="$GF_PATHS_HOME" \
+  --config="$GF_PATHS_CONFIG" \
+  --packaging=docker \
+  cfg:default.log.mode="console" \
+  cfg:default.paths.data="$GF_PATHS_DATA" \
+  cfg:default.paths.logs="$GF_PATHS_LOGS" \
+  cfg:default.paths.plugins="$GF_PATHS_PLUGINS" \
+  cfg:default.paths.provisioning="$GF_PATHS_PROVISIONING" \
+  > >(prefix grafana) 2>&1 &
+PIDS[grafana]=$!
+wait_for grafana 300 curl -sf http://127.0.0.1:3000/api/health
+
+# ---------------------------------------------------------------------
+# Ready
+# ---------------------------------------------------------------------
+if [ "$MQTT_BROKER" = "internal" ]; then
+  mqtt_info="built-in broker, devices publish to <host-ip>:1883"
+else
+  mqtt_info="$MQTT_BROKER"
+fi
+log "------------------------------------------------------------"
+log "ready"
+log "  Grafana  : http://<host-ip>:3000  (user: ${GF_SECURITY_ADMIN_USER:-admin})"
+log "  MQTT     : $mqtt_info"
+log "  topics   : $MQTT_TOPICS  (format: $MQTT_FORMAT)"
+log "  InfluxDB : database '$INFLUXDB_DB', user '$INFLUXDB_USER', retention $INFLUXDB_RETENTION"
+[ "${GF_SECURITY_ADMIN_PASSWORD:-admin}" = "admin" ] && \
+  log "  NOTE     : Grafana asks you to change the default admin password at first login"
+[ "$INFLUXDB_ADMIN_PASSWORD" = "admin" ] && \
+  log "  WARNING  : default InfluxDB admin password in use (INFLUXDB_ADMIN_PASSWORD)"
+log "------------------------------------------------------------"
+
+/usr/local/bin/status-reporter > >(prefix status) 2>&1 &
+PIDS[status]=$!
+
+# ---------------------------------------------------------------------
+# Supervise: exit as soon as any service stops
+# ---------------------------------------------------------------------
+while true; do
+  wait -n "${PIDS[@]}"
+  [ "$STOPPING" -eq 1 ] && exit 0
+  for name in "${!PIDS[@]}"; do
+    if ! kill -0 "${PIDS[$name]}" 2>/dev/null; then
+      log "ERROR: $name stopped unexpectedly, restarting the container"
+      stop_all
+      exit 1
+    fi
+  done
+done

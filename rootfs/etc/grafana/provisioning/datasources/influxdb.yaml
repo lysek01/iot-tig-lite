@@ -1,0 +1,17 @@
+# InfluxDB data source, filled in from the INFLUXDB_* variables.
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    uid: iot-tig-lite-influxdb
+    type: influxdb
+    access: proxy
+    url: http://127.0.0.1:8086
+    isDefault: true
+    user: ${INFLUXDB_USER}
+    jsonData:
+      dbName: ${INFLUXDB_DB}
+      httpMode: POST
+      timeInterval: 10s
+    secureJsonData:
+      password: ${INFLUXDB_USER_PASSWORD}

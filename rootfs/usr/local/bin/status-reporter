@@ -1,0 +1,50 @@
+#!/bin/bash
+# Prints a one-line summary of received MQTT data every minute.
+
+INTERVAL=60
+HINT_AFTER=5   # minutes without messages before a hint is printed
+
+influx() {
+  curl -sf -G http://127.0.0.1:8086/query \
+    -u "$INFLUXDB_USER:$INFLUXDB_USER_PASSWORD" \
+    --data-urlencode "db=$INFLUXDB_DB" \
+    --data-urlencode "q=$1"
+}
+
+# every series written from MQTT carries the "topic" tag
+WHERE="time > now() - ${INTERVAL}s AND \"topic\" =~ /.+/"
+idle=0
+
+while sleep "$INTERVAL"; do
+  counts=$(influx "SELECT count(*) FROM /.*/ WHERE $WHERE GROUP BY \"topic\"") || {
+    echo "cannot query InfluxDB (database '$INFLUXDB_DB', user '$INFLUXDB_USER')"; continue; }
+  last=$(influx "SELECT last(*) FROM /.*/ WHERE $WHERE GROUP BY \"topic\"") || continue
+
+  # messages per topic = highest field count of that topic
+  total=$(jq '[.results[0].series[]? | [.values[0][1:][] | numbers] | max // 0] | add // 0' <<<"$counts")
+  ntopics=$(jq '[.results[0].series[]?.tags.topic] | unique | length' <<<"$counts")
+
+  if [ "$total" -eq 0 ]; then
+    idle=$((idle + 1))
+    if [ $((idle % HINT_AFTER)) -eq 0 ]; then
+      echo "no MQTT messages in the last $idle min - check MQTT_BROKER ($MQTT_BROKER), MQTT_TOPICS ($MQTT_TOPICS) and that your devices publish"
+    fi
+    continue
+  fi
+  idle=0
+
+  # latest value per topic: "topic = 23.4" or "topic {temp=23.4, hum=41}"
+  values=$(jq -r '
+    [ .results[0].series[]?
+      | . as $s
+      | [ range(1; $s.columns | length) as $i
+          | select($s.values[0][$i] != null)
+          | { k: ($s.columns[$i] | sub("^last_"; "")), v: $s.values[0][$i] } ]
+      | if length == 1 and (.[0].k == "value" or .[0].k == "text")
+        then "\($s.tags.topic) = \(.[0].v)"
+        else "\($s.tags.topic) {" + (map("\(.k)=\(.v)") | join(", ")) + "}"
+        end
+    ] | (.[0:5] | join(" | ")) + (if length > 5 then " | ..." else "" end)' <<<"$last")
+
+  echo "last ${INTERVAL}s: $total msgs from $ntopics topic(s) | $values"
+done

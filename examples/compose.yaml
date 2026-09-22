@@ -1,0 +1,32 @@
+# iot-tig-lite - MQTT broker + Telegraf + InfluxDB + Grafana in one container.
+#
+#   1. put this file and ".env" (copy of .env.example) into one directory
+#   2. edit .env
+#   3. docker compose up -d
+#   4. open http://<this-host-ip>:3000
+
+services:
+  iot-tig-lite:
+    image: lysek01/iot-tig-lite:latest
+    container_name: iot-tig-lite
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"     # Grafana
+      - "1883:1883"     # MQTT (built-in broker)
+      - "9001:9001"     # MQTT over WebSockets (built-in broker)
+      # - "8086:8086"   # InfluxDB HTTP API - uncomment to write/query from other devices
+    volumes:
+      - ./data/influxdb:/var/lib/influxdb
+      - ./data/grafana:/var/lib/grafana
+      - ./data/mosquitto:/mosquitto/data
+      # --- Advanced: use your own configuration files (standard locations) ---
+      # - ./config/mosquitto:/mosquitto/config                  # mosquitto.conf, certificates, passwords
+      # - ./config/telegraf.d:/etc/telegraf/telegraf.d          # extra Telegraf inputs/outputs (*.conf)
+      # - ./config/telegraf.conf:/etc/telegraf/telegraf.conf    # replace the whole Telegraf configuration
+      # - ./config/grafana/provisioning:/etc/grafana/provisioning
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

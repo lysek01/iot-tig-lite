@@ -1,0 +1,222 @@
+{
+  "uid": "iot-overview",
+  "title": "IoT Overview",
+  "description": "All MQTT data received by iot-tig-lite",
+  "tags": [
+    "iot-tig-lite"
+  ],
+  "editable": true,
+  "timezone": "browser",
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "topic",
+        "label": "Topic",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "iot-tig-lite-influxdb"
+        },
+        "query": "SHOW TAG VALUES FROM \"mqtt\" WITH KEY = \"topic\"",
+        "definition": "SHOW TAG VALUES FROM \"mqtt\" WITH KEY = \"topic\"",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "Data from every subscribed MQTT topic appear here automatically. This dashboard is read-only. To create your own charts use **Dashboards > New > New dashboard** with the **InfluxDB** data source (measurement `mqtt`, tag `topic`, field `value`)."
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Latest values",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "iot-tig-lite-influxdb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "iot-tig-lite-influxdb"
+          },
+          "refId": "A",
+          "rawQuery": true,
+          "query": "SELECT last(*) FROM \"mqtt\" WHERE \"topic\" =~ /^$topic$/ AND $timeFilter GROUP BY \"topic\"",
+          "resultFormat": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "topic": 0,
+              "last_value": 1,
+              "last_text": 2
+            },
+            "renameByName": {
+              "topic": "Topic"
+            }
+          }
+        },
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^last_(.*)$",
+            "renamePattern": "$1"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Topic",
+            "desc": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "$topic",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "iot-tig-lite-influxdb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "iot-tig-lite-influxdb"
+          },
+          "refId": "A",
+          "rawQuery": true,
+          "query": "SELECT mean(*) FROM \"mqtt\" WHERE \"topic\" =~ /^$topic$/ AND $timeFilter GROUP BY time($__interval) fill(none)",
+          "resultFormat": "time_series",
+          "alias": "$col"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "spanNulls": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "reducer": "allIsNull",
+                "op": "gte",
+                "value": 1
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "repeat": "topic",
+      "repeatDirection": "h",
+      "maxPerRow": 2,
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^mean_(.*)$",
+            "renamePattern": "$1"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+#!/bin/bash
+# Docker HEALTHCHECK: all services must respond.
+curl -sf http://127.0.0.1:8086/ping >/dev/null || { echo "InfluxDB not responding"; exit 1; }
+curl -sf http://127.0.0.1:3000/api/health >/dev/null || { echo "Grafana not responding"; exit 1; }
+pgrep -x telegraf >/dev/null || { echo "Telegraf not running"; exit 1; }
+if [ "$MQTT_BROKER" = "internal" ]; then
+  pgrep -x mosquitto >/dev/null || { echo "Mosquitto not running"; exit 1; }
+fi
+echo ok

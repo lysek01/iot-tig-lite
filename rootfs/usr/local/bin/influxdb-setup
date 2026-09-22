@@ -1,0 +1,92 @@
+#!/bin/bash
+# Applies INFLUXDB_* settings (admin, database, user, retention) on every start.
+#
+# A temporary InfluxDB instance is started without authentication and bound
+# to localhost only, so settings can always be applied – even after the
+# passwords in .env were changed. Existing data are never deleted.
+
+set -euo pipefail
+
+API=http://127.0.0.1:8087
+
+say() { printf 'setup: %s\n' "$*"; }
+
+# InfluxQL quoting
+ident() { local s=${1//\\/\\\\}; printf '"%s"' "${s//\"/\\\"}"; }
+str()   { local s=${1//\\/\\\\}; printf "'%s'" "${s//\'/\\\'}"; }
+
+query() {
+  local out
+  out=$(curl -sS -XPOST "$API/query" --data-urlencode "q=$1") || return 1
+  if jq -e '.error // .results[]?.error // empty' <<<"$out" >/dev/null; then
+    say "ERROR: $(jq -r '.error // .results[]?.error // empty' <<<"$out" | head -1)"
+    return 1
+  fi
+  printf '%s' "$out"
+}
+
+# --- retention: <n>h | <n>d | <n>w | INF --------------------------------
+retention="${INFLUXDB_RETENTION,,}"
+if [ "$retention" = "inf" ] || [ "$retention" = "0" ]; then
+  duration=INF; shard=7d
+elif [[ "$retention" =~ ^([0-9]+)([hdw])$ ]]; then
+  n=${BASH_REMATCH[1]}
+  case ${BASH_REMATCH[2]} in h) secs=$((n*3600));; d) secs=$((n*86400));; w) secs=$((n*604800));; esac
+  [ "$secs" -ge 3600 ] || { say "ERROR: INFLUXDB_RETENTION must be at least 1h"; exit 1; }
+  duration=$retention
+  # same shard group sizes InfluxDB uses by default
+  if   [ "$secs" -lt 172800 ];   then shard=1h
+  elif [ "$secs" -le 15552000 ]; then shard=1d
+  else shard=7d; fi
+else
+  say "ERROR: INFLUXDB_RETENTION='$INFLUXDB_RETENTION' is not valid. Use e.g. 12h, 30d, 52w or INF"
+  exit 1
+fi
+
+# --- temporary instance ----------------------------------------------------
+# its output is shown only when something goes wrong
+tmplog=$(mktemp)
+INFLUXDB_HTTP_AUTH_ENABLED=false INFLUXDB_HTTP_BIND_ADDRESS=127.0.0.1:8087 \
+  influxd -config /etc/influxdb/influxdb.conf >"$tmplog" 2>&1 &
+pid=$!
+trap 'kill -TERM $pid 2>/dev/null; wait $pid 2>/dev/null; rm -f "$tmplog"' EXIT
+trap 'cat "$tmplog"' ERR
+
+for _ in $(seq 1 120); do
+  curl -sf "$API/ping" >/dev/null && break
+  kill -0 $pid 2>/dev/null || { cat "$tmplog"; say "ERROR: InfluxDB failed to start"; exit 1; }
+  sleep 1
+done
+curl -sf "$API/ping" >/dev/null || { cat "$tmplog"; say "ERROR: InfluxDB did not start within 120s"; exit 1; }
+
+users=$(query "SHOW USERS" | jq -r '.results[0].series[0].values[]?[0]')
+user_exists() { grep -qxF -- "$1" <<<"$users"; }
+
+# admin
+if user_exists "$INFLUXDB_ADMIN_USER"; then
+  query "SET PASSWORD FOR $(ident "$INFLUXDB_ADMIN_USER") = $(str "$INFLUXDB_ADMIN_PASSWORD")" >/dev/null
+else
+  query "CREATE USER $(ident "$INFLUXDB_ADMIN_USER") WITH PASSWORD $(str "$INFLUXDB_ADMIN_PASSWORD") WITH ALL PRIVILEGES" >/dev/null
+  say "created admin user '$INFLUXDB_ADMIN_USER'"
+fi
+query "GRANT ALL PRIVILEGES TO $(ident "$INFLUXDB_ADMIN_USER")" >/dev/null
+
+# database
+if ! query "SHOW DATABASES" | jq -r '.results[0].series[0].values[]?[0]' | grep -qxF -- "$INFLUXDB_DB"; then
+  query "CREATE DATABASE $(ident "$INFLUXDB_DB")" >/dev/null
+  say "created database '$INFLUXDB_DB'"
+fi
+
+# database user
+if user_exists "$INFLUXDB_USER"; then
+  query "SET PASSWORD FOR $(ident "$INFLUXDB_USER") = $(str "$INFLUXDB_USER_PASSWORD")" >/dev/null
+else
+  query "CREATE USER $(ident "$INFLUXDB_USER") WITH PASSWORD $(str "$INFLUXDB_USER_PASSWORD")" >/dev/null
+  say "created user '$INFLUXDB_USER'"
+fi
+query "GRANT ALL ON $(ident "$INFLUXDB_DB") TO $(ident "$INFLUXDB_USER")" >/dev/null
+
+# retention of the default policy "autogen"
+query "ALTER RETENTION POLICY \"autogen\" ON $(ident "$INFLUXDB_DB") DURATION $duration SHARD DURATION $shard DEFAULT" >/dev/null
+
+say "database '$INFLUXDB_DB' ready (user '$INFLUXDB_USER', retention $INFLUXDB_RETENTION)"
