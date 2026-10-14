@@ -132,10 +132,44 @@ equals "line protocol stored"     "$(field $D env lab/env temp)" "24.5"
 check  "healthcheck ok"           x healthcheck
 
 # ---------------------------------------------------------------------
-echo "== 4. invalid configuration gives a clear error"
+echo "== 4. topic tags, time from the message, HTTP input, influx client"
+start 'MQTT_TOPIC_TAGS=_/_/_/node/meas' MQTT_TIME_FIELD=timestamp HTTP_ENABLED=true HTTP_USERNAME=dev HTTP_PASSWORD=pw || exit 1
+post() { # post <user:pass> <topic or -> <body> -> HTTP status code
+  local h=(); [ "$2" != - ] && h=(-H "Topic: $2")
+  x curl -s -o /dev/null -w '%{http_code}' -u "$1" "${h[@]}" -d "$3" http://127.0.0.1:8080/data
+}
+equals "HTTP POST accepted"       "$(post dev:pw loravsb/169/meas/05/0001 '{"pkt":2,"rssi":-70,"timestamp":"2026-10-14T10:00:00Z"}')" "204"
+equals "HTTP wrong login rejected" "$(post dev:bad pc11/t 1)" "401"
+equals "HTTP without Topic header" "$(post dev:pw - 42)" "204"
+pub loravsb/169/meas/03/0007 '{"pkt":1,"rssi":-112.5,"timestamp":"2026-10-14T12:00:00.250+02:00"}'
+pub loravsb/169/meas/03/0008 '{"pkt":1,"rssi":-100,"timestamp":1792000000123}'
+pub loravsb/169/meas/04/0001 '{"pkt":1,"rssi":-90,"timestamp":"2026-10-14 12:00:00"}'
+pub loravsb/169/meas/04/0002 '{"pkt":1,"rssi":-80,"timestamp":"yesterday"}'
+pub t/two '{"v":1,"timestamp":"2026-10-14T10:00:00Z"}'
+sleep 12
+ms() { # ms <fields> <where> -> "time_ms values..." of the newest matching record
+  x curl -sf -G http://127.0.0.1:8086/query -u iot:iot --data-urlencode db=iot --data-urlencode epoch=ms     --data-urlencode "q=SELECT $1 FROM mqtt WHERE $2 ORDER BY time DESC LIMIT 1" | jqc -r '.results[0].series[0].values[0] | map(tostring) | join(" ")'
+}
+equals "tags node/meas, ISO time with offset" "$(ms pkt,rssi "node = '03' AND meas = '0007'")" "$(date -u -d '2026-10-14T10:00:00.250Z' +%s%3N) 1 -112.5"
+equals "Unix time in ms"          "$(ms pkt,rssi "node = '03' AND meas = '0008'")" "1792000000123 1 -100"
+equals "local time without offset (TZ)" "$(ms pkt,rssi "node = '04' AND meas = '0001'")" "$(date -u -d '2026-10-14T10:00:00Z' +%s%3N) 1 -90"
+check  "invalid time -> time of reception" bash -c "[ \"\$(docker exec $NAME curl -sf -G http://127.0.0.1:8086/query -u iot:iot --data-urlencode db=iot --data-urlencode epoch=s --data-urlencode \"q=SELECT last(rssi) FROM mqtt WHERE meas = '0002'\" | docker exec -i $NAME jq '.results[0].series[0].values[0][0]')\" -gt \$((\$(date +%s) - 120)) ]"
+check  "invalid time reported in log" bash -c "docker logs $NAME 2>&1 | grep -q 'timestamp=\"yesterday\" is not a valid time'"
+equals "time key not stored as field" "$(influxq iot iot iot "SHOW FIELD KEYS FROM mqtt" | jqc -r '[.results[0].series[0].values[][0]] | index("timestamp")')" "null"
+equals "2-level topic: no node tag" "$(ms v "topic = 't/two' AND node = ''")" "$(date -u -d '2026-10-14T10:00:00Z' +%s%3N) 1"
+equals "HTTP: same tags and time as MQTT" "$(ms pkt,rssi "node = '05' AND meas = '0001'")" "$(date -u -d '2026-10-14T10:00:00Z' +%s%3N) 2 -70"
+equals "HTTP: default topic 'http'" "$(field $D mqtt http value)" "42"
+equals "influx client works"      "$(x influx -username iot -password iot -database iot -execute 'SHOW TAG KEYS FROM mqtt' -format json | jqc -c '[.results[0].series[0].values[][0]]')" '["meas","node","topic"]'
+
+# ---------------------------------------------------------------------
+echo "== 5. invalid configuration gives a clear error"
 docker rm -f $NAME >/dev/null
 out=$(docker run --rm "${PLAT[@]}" -e MQTT_BROKER=192.168.1.100 "$IMAGE" 2>&1)
 check  "bad MQTT_BROKER rejected" grep -q "MQTT_BROKER='192.168.1.100' is not valid" <<<"$out"
+out=$(docker run --rm "${PLAT[@]}" -e MQTT_TOPIC_TAGS='a//b' "$IMAGE" 2>&1)
+check  "bad MQTT_TOPIC_TAGS rejected" grep -q "MQTT_TOPIC_TAGS pattern 'a//b' is not valid" <<<"$out"
+out=$(docker run --rm "${PLAT[@]}" -e MQTT_TIME_FIELD=ts -e MQTT_FORMAT=value "$IMAGE" 2>&1)
+check  "MQTT_TIME_FIELD with value format rejected" grep -q "MQTT_TIME_FIELD works with MQTT_FORMAT=auto or json" <<<"$out"
 
 echo
 echo "RESULT: $PASS passed, $FAILED failed"

@@ -15,6 +15,7 @@ services:
       - "3000:3000"     # Grafana
       - "1883:1883"     # MQTT (built-in broker)
       - "9001:9001"     # MQTT over WebSockets (built-in broker)
+      # - "8080:8080"   # HTTP input - uncomment together with HTTP_ENABLED=true
       # - "8086:8086"   # InfluxDB HTTP API - uncomment to write/query from other devices
     volumes:
       - ./data/influxdb:/var/lib/influxdb

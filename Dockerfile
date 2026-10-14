@@ -5,6 +5,7 @@
 # Build (multi-arch):
 #   docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 -t lysek01/iot-tig-lite .
 
+ARG IOT_TIG_LITE_VERSION=0.2.0
 ARG ALPINE_VERSION=3.24
 ARG GO_VERSION=1.27
 ARG TELEGRAF_VERSION=1.40.1
@@ -27,7 +28,7 @@ RUN --mount=type=cache,target=/root/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     export CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM="${TARGETVARIANT#v}" && \
     go build -trimpath \
-      -tags "custom,inputs.mqtt_consumer,inputs.cpu,inputs.mem,inputs.disk,inputs.system,inputs.temp,inputs.filecount,outputs.influxdb,parsers.value,parsers.influx,serializers.influx,processors.starlark" \
+      -tags "custom,inputs.mqtt_consumer,inputs.cpu,inputs.mem,inputs.disk,inputs.system,inputs.temp,inputs.filecount,outputs.influxdb,parsers.value,parsers.influx,serializers.influx,processors.starlark,inputs.http_listener_v2" \
       -ldflags "-s -w -X github.com/influxdata/telegraf/internal.Version=${TELEGRAF_VERSION}" \
       -o /out/telegraf ./cmd/telegraf
 
@@ -43,10 +44,10 @@ FROM grafana/grafana:${GRAFANA_VERSION} AS grafana-upstream
 # ---------------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS slim
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends binutils-multiarch >/dev/null && rm -rf /var/lib/apt/lists/*
-COPY --from=influxdb-upstream /usr/bin/influxd /out/usr/bin/influxd
+COPY --from=influxdb-upstream /usr/bin/influxd /usr/bin/influx /out/usr/bin/
 COPY --from=grafana-upstream /usr/share/grafana /out/usr/share/grafana
 RUN set -e; \
-    strip /out/usr/bin/influxd /out/usr/share/grafana/bin/grafana; \
+    strip /out/usr/bin/influxd /out/usr/bin/influx /out/usr/share/grafana/bin/grafana; \
     cd /out/usr/share/grafana; \
     # source maps and the Swagger API browser are not needed at runtime
     find public -name '*.map' -delete; \
@@ -64,6 +65,7 @@ RUN set -e; \
 # Final image
 # ---------------------------------------------------------------------
 FROM alpine:${ALPINE_VERSION}
+ARG IOT_TIG_LITE_VERSION
 ARG TELEGRAF_VERSION
 ARG INFLUXDB_VERSION
 ARG GRAFANA_VERSION
@@ -82,13 +84,24 @@ COPY rootfs/ /
 RUN find /usr/local/bin /etc/influxdb /etc/grafana /usr/share/iot-tig-lite -type f -exec sed -i 's/\r$//' {} + \
  && chmod +x /usr/local/bin/*
 
-ENV IOT_TIG_LITE_VERSIONS="telegraf ${TELEGRAF_VERSION}, influxdb ${INFLUXDB_VERSION}, grafana ${GRAFANA_VERSION}" \
+LABEL org.opencontainers.image.title="iot-tig-lite" \
+      org.opencontainers.image.version="${IOT_TIG_LITE_VERSION}" \
+      org.opencontainers.image.source="https://github.com/lysek01/iot-tig-lite"
+
+ENV IOT_TIG_LITE_VERSION=${IOT_TIG_LITE_VERSION} \
+    IOT_TIG_LITE_VERSIONS="telegraf ${TELEGRAF_VERSION}, influxdb ${INFLUXDB_VERSION}, grafana ${GRAFANA_VERSION}" \
     # --- MQTT ---
     MQTT_BROKER=internal \
     MQTT_USERNAME= \
     MQTT_PASSWORD= \
     MQTT_TOPICS=# \
     MQTT_FORMAT=auto \
+    MQTT_TOPIC_TAGS= \
+    MQTT_TIME_FIELD= \
+    # --- HTTP input ---
+    HTTP_ENABLED=false \
+    HTTP_USERNAME= \
+    HTTP_PASSWORD= \
     # --- InfluxDB ---
     INFLUXDB_DB=iot \
     INFLUXDB_USER=iot \
@@ -107,8 +120,8 @@ ENV IOT_TIG_LITE_VERSIONS="telegraf ${TELEGRAF_VERSION}, influxdb ${INFLUXDB_VER
     SYSTEM_METRICS=true \
     TZ=Europe/Prague
 
-# 3000 Grafana, 1883 MQTT, 9001 MQTT over WebSockets, 8086 InfluxDB HTTP API
-EXPOSE 3000 1883 9001 8086
+# 3000 Grafana, 1883 MQTT, 9001 MQTT over WebSockets, 8080 HTTP input, 8086 InfluxDB HTTP API
+EXPOSE 3000 1883 9001 8080 8086
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 CMD ["/usr/local/bin/healthcheck"]
 

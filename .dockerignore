@@ -3,3 +3,4 @@ test/
 examples/
 *.md
 dist/
+.github/

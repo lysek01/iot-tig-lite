@@ -67,6 +67,10 @@ After a change run `docker compose up -d` again.
 | `MQTT_USERNAME`, `MQTT_PASSWORD` | empty | login Telegraf uses for the broker (empty = anonymous) |
 | `MQTT_TOPICS` | `#` | topics to subscribe to, comma separated, wildcards `+` and `#` |
 | `MQTT_FORMAT` | `auto` | `auto`, `value`, `json` or `influx` – see below |
+| `MQTT_TOPIC_TAGS` | empty | topic levels as extra tags, e.g. `_/_/_/node/meas` – see below |
+| `MQTT_TIME_FIELD` | empty | JSON key with the time of the record; empty = time of reception – see below |
+| `HTTP_ENABLED` | `false` | accept data with HTTP POST on port 8080 – see below |
+| `HTTP_USERNAME`, `HTTP_PASSWORD` | empty | basic authentication for the HTTP input (empty = open) |
 | `INFLUXDB_DB` | `iot` | database for the data |
 | `INFLUXDB_USER`, `INFLUXDB_USER_PASSWORD` | `iot`, `iot` | user with all privileges on the database (used by Telegraf and Grafana) |
 | `INFLUXDB_ADMIN_USER`, `INFLUXDB_ADMIN_PASSWORD` | `admin`, `admin` | InfluxDB server administrator |
@@ -101,6 +105,57 @@ All numbers are stored as floats. `MQTT_FORMAT` selects which payloads are accep
 | `json` | JSON only |
 | `influx` | [InfluxDB line protocol](https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/), measurement and fields come from the message; the `topic` tag is added |
 
+### Topic levels as tags
+
+`MQTT_TOPIC_TAGS` turns levels of the topic into tags (works the same for the HTTP input,
+where the topic comes from the `Topic` header). Each level is a tag name, `_` skips a level. A pattern applies to topics with the same number
+of levels; give more patterns separated by commas (one per number of levels).
+
+```ini
+MQTT_TOPIC_TAGS=_/_/_/node/meas
+```
+
+| Topic | Tags |
+|---|---|
+| `lab/169/meas/03/0007` | `topic=lab/169/meas/03/0007`, `node=03`, `meas=0007` |
+| `pc11/t` (2 levels) | `topic=pc11/t` only |
+
+In Grafana you can then filter and group by `node` or `meas` directly.
+
+### Time of the record
+
+By default each record gets the time it was received. With `MQTT_TIME_FIELD` (formats `auto`
+and `json`) the time is taken from that key of the JSON message instead, and the key is not
+stored as a field:
+
+```ini
+MQTT_TIME_FIELD=timestamp
+```
+
+| Value in the message | Read as |
+|---|---|
+| `"2026-10-14T12:00:00.123+02:00"`, `"…Z"` | ISO 8601 / RFC 3339 |
+| `"2026-10-14T12:00:00"` (no offset) | local time in `TZ` |
+| `1792000000`, `1792000000123`, … | Unix time in s, ms, µs or ns (guessed from the size) |
+
+A message without the key, or with a value that cannot be read, gets the time of reception
+(an invalid value is reported in the log).
+
+### HTTP input
+
+With `HTTP_ENABLED=true` (and port `8080` published in `compose.yaml`) devices and scripts can
+send data with an HTTP `POST` (or `PUT`) instead of MQTT. The body is handled exactly like an MQTT
+message: same `MQTT_FORMAT`, `MQTT_TOPIC_TAGS` and `MQTT_TIME_FIELD`, stored in the same
+measurement `mqtt`. The `Topic` header plays the role of the MQTT topic; without it the topic is `http`.
+
+```bash
+curl -H "Topic: pc11/t" -d 23.4 http://<host>:8080/data
+curl -H "Topic: lab/169/meas/03/0007" -d '{"rssi":-112.5,"snr":-6.25}' http://<host>:8080/data
+curl -u user:pass -H "Topic: pc11/t" -d 23.4 http://<host>:8080/data   # with HTTP_USERNAME/PASSWORD
+```
+
+A successful request returns `204 No Content`; a wrong login returns `401`.
+
 ### Your own chart in Grafana
 
 *Dashboards → New → New dashboard → Add visualization → InfluxDB*, then in the query editor:
@@ -120,6 +175,7 @@ SELECT mean("value") FROM "mqtt" WHERE "topic" = 'pc11/t' AND $timeFilter GROUP 
 | 3000 | Grafana |
 | 1883 | MQTT (built-in broker) |
 | 9001 | MQTT over WebSockets (built-in broker) |
+| 8080 | HTTP input (only with `HTTP_ENABLED=true`) |
 | 8086 | InfluxDB HTTP API, authentication required (not published by the example compose file) |
 
 | Path in container | Content |
@@ -141,8 +197,8 @@ Uncomment the matching lines in [`compose.yaml`](examples/compose.yaml).
 | InfluxDB | `/etc/influxdb/influxdb.conf` | or `INFLUXDB_<SECTION>_<KEY>` variables |
 | Grafana | `/etc/grafana/grafana.ini`, `/etc/grafana/provisioning` | or `GF_*` variables. Mounting `provisioning` replaces the built-in data source and dashboards. |
 
-The Telegraf build in this image contains only these plugins: inputs `mqtt_consumer`, `cpu`, `mem`,
-`disk`, `system`, `temp`, `filecount`; output `influxdb`; parsers `value`, `influx`; processor `starlark`.
+The Telegraf build in this image contains only these plugins: inputs `mqtt_consumer`, `http_listener_v2`,
+`cpu`, `mem`, `disk`, `system`, `temp`, `filecount`; output `influxdb`; parsers `value`, `influx`; processor `starlark`.
 
 ## Maintenance
 
@@ -156,12 +212,39 @@ docker exec -it iot-tig-lite mosquitto_sub -t '#' -v   # watch MQTT messages
 Old data are deleted automatically after `INFLUXDB_RETENTION`.
 The example `compose.yaml` limits the container log to 30 MB.
 
+### InfluxDB command line
+
+The image contains the standard InfluxDB 1.8 client `influx`:
+
+```bash
+docker exec -it iot-tig-lite influx -username iot -password iot -database iot
+```
+
+```sql
+SHOW MEASUREMENTS
+SHOW TAG VALUES FROM "mqtt" WITH KEY = "topic"
+SELECT * FROM "mqtt" WHERE time > now() - 10m
+```
+
+Use the `INFLUXDB_ADMIN_*` account for server-wide commands (`SHOW DATABASES`, `SHOW USERS`, …).
+
+## Changelog
+
+- **0.2.0** – HTTP input (`HTTP_ENABLED`), `MQTT_TOPIC_TAGS` (topic levels as tags),
+  `MQTT_TIME_FIELD` (time of the record from the message), InfluxDB command-line client `influx`.
+- **0.1.0** – first release.
+
 ## Building
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 -t lysek01/iot-tig-lite --push .
 test/test.sh iot-tig-lite:dev                 # end-to-end test of a local image
 ```
+
+Releases are built by GitHub Actions ([`.github/workflows/docker.yml`](.github/workflows/docker.yml)):
+pushing a tag `vX.Y.Z` builds all three platforms, runs the end-to-end test and pushes
+`lysek01/iot-tig-lite:X.Y.Z`, `:X.Y` and `:latest` to Docker Hub. The repository needs the secrets
+`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
 
 Telegraf is compiled from source with only the needed plugins; InfluxDB and Grafana binaries come
 from their official images, stripped of debug information, unused plugins, translations and source maps.

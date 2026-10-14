@@ -48,20 +48,62 @@ if [ -n "$MQTT_USERNAME" ]; then
   echo "  password = $(q "$MQTT_PASSWORD")"
 fi
 
-if [ "$MQTT_FORMAT" = "influx" ]; then
-  echo '  data_format = "influx"'
-else
+# how incoming messages are parsed (same for MQTT and HTTP)
+payload_format() {
+  if [ "$MQTT_FORMAT" = "influx" ]; then
+    echo '  data_format = "influx"'
+  else
+    echo '  name_override = "mqtt"'
+    echo '  data_format = "value"'
+    echo '  data_type = "string"'
+  fi
+}
+payload_format
+
+case "${HTTP_ENABLED,,}" in
+  true|yes|1|on)
+    cat <<EOF
+
+# HTTP input: POST/PUT to http://<host>:8080/data, topic in the "Topic" header
+[[inputs.http_listener_v2]]
+  service_address = ":8080"
+  paths = ["/data"]
+  methods = ["POST", "PUT"]
+  http_header_tags = {"Topic" = "topic"}
+  max_body_size = "1MB"
+EOF
+    if [ -n "${HTTP_USERNAME:-}" ]; then
+      echo "  basic_username = $(q "$HTTP_USERNAME")"
+      echo "  basic_password = $(q "${HTTP_PASSWORD:-}")"
+    fi
+    payload_format
+    ;;
+esac
+
+if [ "$MQTT_FORMAT" != "influx" ]; then
   cat <<EOF
-  name_override = "mqtt"
-  data_format = "value"
-  data_type = "string"
 
 # Turns the raw payload into fields (number, true/false, JSON, text).
 [[processors.starlark]]
+  order = 1
   namepass = ["mqtt"]
   script = "/usr/share/iot-tig-lite/mqtt-payload.star"
   [processors.starlark.constants]
     mode = $(q "$MQTT_FORMAT")
+    time_field = $(q "${MQTT_TIME_FIELD:-}")
+    tz = $(q "${TZ:-UTC}")
+EOF
+fi
+
+# MQTT_TOPIC_TAGS: levels of the "topic" tag become extra tags
+if [ -n "${MQTT_TOPIC_TAGS//[[:space:]]/}" ]; then
+  cat <<EOF
+
+[[processors.starlark]]
+  order = 2
+  script = "/usr/share/iot-tig-lite/topic-tags.star"
+  [processors.starlark.constants]
+    patterns = $(q "${MQTT_TOPIC_TAGS//[[:space:]]/}")
 EOF
 fi
 

@@ -40,9 +40,30 @@ for v in INFLUXDB_DB INFLUXDB_USER INFLUXDB_USER_PASSWORD INFLUXDB_ADMIN_USER IN
 done
 [ "$INFLUXDB_USER" != "$INFLUXDB_ADMIN_USER" ] || fail "INFLUXDB_USER and INFLUXDB_ADMIN_USER must be different users"
 
+# MQTT_TOPIC_TAGS: comma separated patterns like "_/_/_/node/meas", one per number of topic levels
+declare -A tag_levels=()
+IFS=',' read -ra tag_patterns <<<"${MQTT_TOPIC_TAGS:-}"
+for p in "${tag_patterns[@]}"; do
+  p="${p//[[:space:]]/}"
+  [ -n "$p" ] || continue
+  name='[A-Za-z][A-Za-z0-9_]*'
+  [[ "$p" =~ ^(_|$name)(/(_|$name))*$ ]] && [[ "$p" =~ [A-Za-z] ]] || \
+    fail "MQTT_TOPIC_TAGS pattern '$p' is not valid. Use tag names and '_' separated by '/', e.g. _/_/_/node/meas"
+  [[ "/$p/" != */topic/* ]] || fail "MQTT_TOPIC_TAGS: 'topic' is a reserved tag name"
+  n=$(( $(tr -cd '/' <<<"$p" | wc -c) + 1 ))
+  [ -z "${tag_levels[$n]:-}" ] || fail "MQTT_TOPIC_TAGS: two patterns with $n levels ('${tag_levels[$n]}' and '$p')"
+  tag_levels[$n]=$p
+done
+
+if [ -n "${MQTT_TIME_FIELD:-}" ]; then
+  [[ "$MQTT_TIME_FIELD" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "MQTT_TIME_FIELD='$MQTT_TIME_FIELD' is not a valid JSON key name"
+  [ "$MQTT_FORMAT" = "auto" ] || [ "$MQTT_FORMAT" = "json" ] || \
+    fail "MQTT_TIME_FIELD works with MQTT_FORMAT=auto or json (line protocol carries its own time)"
+fi
+
 export MQTT_SERVER
 
-log "starting iot-tig-lite ($IOT_TIG_LITE_VERSIONS)"
+log "starting iot-tig-lite $IOT_TIG_LITE_VERSION ($IOT_TIG_LITE_VERSIONS)"
 
 # ---------------------------------------------------------------------
 # Service handling
@@ -148,6 +169,11 @@ log "ready"
 log "  Grafana  : http://<host-ip>:3000  (user: ${GF_SECURITY_ADMIN_USER:-admin})"
 log "  MQTT     : $mqtt_info"
 log "  topics   : $MQTT_TOPICS  (format: $MQTT_FORMAT)"
+case "${HTTP_ENABLED,,}" in
+  true|yes|1|on) log "  HTTP     : POST http://<host-ip>:8080/data, topic in header 'Topic'${HTTP_USERNAME:+ (basic auth)}" ;;
+esac
+[ -n "${MQTT_TOPIC_TAGS:-}" ] && log "  tags     : $MQTT_TOPIC_TAGS"
+log "  time     : ${MQTT_TIME_FIELD:+from JSON key '$MQTT_TIME_FIELD', else }time of reception"
 log "  InfluxDB : database '$INFLUXDB_DB', user '$INFLUXDB_USER', retention $INFLUXDB_RETENTION"
 [ "${GF_SECURITY_ADMIN_PASSWORD:-admin}" = "admin" ] && \
   log "  NOTE     : Grafana asks you to change the default admin password at first login"
